@@ -274,6 +274,72 @@ class YouTubeBackend(private val account: YouTubeAccount) : MusicBackend {
      * nothing in it.
      */
     override suspend fun homeFeed(cursor: String?, params: String?): HomeFeed =
+        if (CHRISTIAN_HOME) christianHomeFeed(cursor) else officialHomeFeed(cursor, params)
+
+    /**
+     * The home page made of [ChristianHome.shelves] instead of YouTube's own.
+     *
+     * Paged like the real one: [cursor] is the index of the next shelf, so the
+     * list keeps asking for more as it is scrolled and only what is reached is
+     * searched. A shelf that fails is left out rather than failing the page.
+     */
+    private suspend fun christianHomeFeed(cursor: String?): HomeFeed =
+        withContext(Dispatchers.IO) {
+            val all = ChristianHome.shelves
+            val start = (cursor?.toIntOrNull() ?: 0).coerceIn(0, all.size)
+            val end = minOf(start + ChristianHome.PAGE_SIZE, all.size)
+            val rows = coroutineScope {
+                all.subList(start, end)
+                    .map { shelf -> async { runCatching { christianRow(shelf) }.getOrNull() } }
+                    .awaitAll()
+            }.filterNotNull().filterNot { it.isEmpty }
+            HomeFeed(
+                rows = rows,
+                cursor = if (end < all.size) end.toString() else null,
+            )
+        }
+
+    private suspend fun christianRow(shelf: ChristianHome.Shelf): HomeRow = when (shelf) {
+        is ChristianHome.Artists -> coroutineScope {
+            val found = shelf.names
+                .map { name ->
+                    async {
+                        searchItems(name, YouTube.SearchFilter.FILTER_ARTIST)
+                            .filterIsInstance<ArtistItem>()
+                            .firstOrNull()
+                    }
+                }
+                .awaitAll()
+                .filterNotNull()
+            HomeRow(title = shelf.title, items = found.mapNotNull(::toCatalogPlaylist))
+        }
+
+        is ChristianHome.Songs -> {
+            val all = searchItems(shelf.query, YouTube.SearchFilter.FILTER_SONG)
+                .filterIsInstance<SongItem>()
+            // Only the artist's own songs when there are any: a search for a
+            // name also turns up covers and songs that merely mention it.
+            val own = shelf.artist
+                ?.let { name -> all.filter { song -> song.artists.any { it.name.contains(name, ignoreCase = true) } } }
+                .orEmpty()
+            HomeRow(
+                title = shelf.title,
+                strapline = shelf.strapline,
+                tracks = own.ifEmpty { all }.take(CHRISTIAN_ROW_SIZE).map(::toCatalogTrack),
+            )
+        }
+
+        is ChristianHome.Playlists -> HomeRow(
+            title = shelf.title,
+            items = searchItems(shelf.query, YouTube.SearchFilter.FILTER_COMMUNITY_PLAYLIST)
+                .filterIsInstance<PlaylistItem>()
+                .mapNotNull(::toCatalogPlaylist)
+                .take(CHRISTIAN_ROW_SIZE),
+        )
+    }
+
+    /** YouTube Music's own home, as it laid it out; used when [CHRISTIAN_HOME] is off. */
+    private suspend fun officialHomeFeed(cursor: String?, params: String?): HomeFeed =
         withContext(Dispatchers.IO) {
             val page = wherever({ it.sections.isEmpty() }) {
                 YouTube.home(continuation = cursor, params = params).getOrThrow()
@@ -933,6 +999,12 @@ class YouTubeBackend(private val account: YouTubeAccount) : MusicBackend {
 
         /** YouTube Music's own browse id for the account's playlist library. */
         private const val LOG_TAG = "SquareYouTube"
+
+        /** True: the home is [ChristianHome]'s list. False: YouTube's own home. */
+        private const val CHRISTIAN_HOME = true
+
+        /** The most songs or playlists one Christian shelf shows. */
+        private const val CHRISTIAN_ROW_SIZE = 20
         private const val LIKED_PLAYLISTS_BROWSE_ID = "FEmusic_liked_playlists"
         private const val SAVED_ALBUMS_BROWSE_ID = "FEmusic_liked_albums"
         private const val FOLLOWED_ARTISTS_BROWSE_ID = "FEmusic_library_corpus_track_artists"
