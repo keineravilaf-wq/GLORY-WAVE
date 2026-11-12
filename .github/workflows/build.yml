@@ -24,6 +24,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Heaven Sound: if heaven.zip is in the repository's root, its files are
+      # laid over the project before it is built. To change the app, upload a
+      # new heaven.zip; nothing else needs touching.
+      - name: Apply Heaven Sound changes
+        run: |
+          if [ -f heaven.zip ]; then
+            unzip -o heaven.zip -x "__MACOSX/*"
+          else
+            echo "No heaven.zip: building the project as it is."
+          fi
+
       - uses: ./.github/actions/setup
 
       - name: Build
@@ -31,7 +42,7 @@ jobs:
 
       - uses: actions/upload-artifact@v7
         with:
-          name: square-dev-${{ github.sha }}
+          name: heaven-sound-${{ github.sha }}
           path: app/build/outputs/apk/dev/app-universal-dev.apk
           retention-days: 14
           if-no-files-found: error
